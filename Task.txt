@@ -1,0 +1,25 @@
+Task: Junior AI Engineer
+Time: 3 days | Language: Python | Submit: Public GitHub repo
+The Task
+Build an AI assistant that can read, query, insert, modify, and delete data from
+two Excel files using custom tools you build from scratch in Python.
+You'll receive:
+real_estate_listings.xlsx — U.S. property listings
+marketing_campaigns.xlsx — campaign performance data
+Your assistant should handle any reasonable natural language request about
+either file.
+the easier for the user to get answers. the higher your score is
+Constraints
+No pre-built tool/agent frameworks. No LangChain, LlamaIndex, AutoGen,
+CrewAI, or similar. The tool layer is yours to design and build. You can use
+libraries for data handling and LLM calls.
+Free LLMs only. Local models, OpenRouter, NVIDIA Build, Groq, Gemini free
+tier, or any other free option.
+Python only.
+What to Submit
+A public GitHub repo containing your code, a README.md , and a DECISIONS.md
+explaining your design choices, tradeoffs, and what you'd do differently. The
+quality of your thinking matters more than the quantity of your code.
+Evaluation
+After submission: 30-minute live call where you defend your decisions. We will
+push back.
