@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Excel Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2>AI Excel Assistant</h2>
+                <div class="session-info">
+                    <span class="session-label">Session ID:</span>
+                    <span id="session-id-display" class="session-id">None</span>
+                </div>
+            </div>
+            
+            <div class="sidebar-actions">
+                <button id="new-chat-btn" class="btn primary-btn">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    New Chat
+                </button>
+            </div>
+
+            <div class="examples-section">
+                <h3>Try these examples:</h3>
+                <ul class="example-list">
+                    <li class="example-item">Show me all houses in San Francisco under $1,000,000</li>
+                    <li class="example-item">What is the average price of 3-bedroom houses?</li>
+                    <li class="example-item">Insert a new 4-bedroom house in Austin for $500,000</li>
+                    <li class="example-item">Update the price of house LST-5005 to $475,000</li>
+                    <li class="example-item">Delete the marketing campaign named "Back to School - Facebook 2025 Q3"</li>
+                </ul>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-area">
+            <div id="chat-messages" class="chat-messages">
+            </div>
+
+            <!-- Static latency indicator in bottom-left -->
+            <div id="latency-indicator" class="latency-indicator hidden">
+                <span class="latency-dot"></span>
+                <span id="latency-text">TTFT: —</span>
+            </div>
+
+            <div class="chat-input-container">
+                <form id="chat-form">
+                    <input type="text" id="chat-input" placeholder="Type your message here..." autocomplete="off">
+                    <button type="submit" id="send-btn" class="btn icon-btn">
+                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                    </button>
+                </form>
+            </div>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
