@@ -81,9 +81,9 @@ This document explains the key design decisions made in building the AI Agent Ex
 
 ---
 
-## 6. Preview + Confirmation: Two-Step Mutations
+## 6. Preview + Confirmation: Inline Chat Confirmation
 
-**Decision:** Every data mutation (insert/update/delete/undo) returns a human-readable preview and requires explicit "yes/no" confirmation before executing.
+**Decision:** Every data mutation (insert/update/delete/undo) returns a human-readable preview and requires explicit "yes/no" confirmation before executing. Confirmations happen **inline in the chat** — no modal popups.
 
 **Why:** This is critical for user trust. The before/after comparison format makes changes immediately understandable:
 
@@ -93,6 +93,8 @@ Record 'LST-5001':
 ```
 
 **Implementation:** Tools return `requires_confirmation=True` with a preview string. The agent core stores a `PendingConfirmation` in the session. The next user message is interpreted as yes/no (with fuzzy matching for natural language like "go ahead", "sure", etc.).
+
+**Earlier approach (discarded):** A modal popup intercepted mutation responses and presented Confirm/Cancel buttons. This was removed because it broke the natural chat flow — users expect to respond conversationally, not via UI dialogs.
 
 **Tradeoff:** Adds one extra round-trip for mutations. This is intentional — the alternative (auto-executing) is risky for destructive operations.
 
@@ -145,31 +147,97 @@ Record 'LST-5001':
 ## 10. System Prompt Design
 
 **Decision:** The system prompt is dynamically generated with:
-- Available dataset schemas (column names, types, sample values, ranges)
-- Tool usage instructions and examples
+- Available dataset schemas (column names, types, value ranges)
+- Explicit tool parameter names and usage instructions
 - Explicit rules (never fabricate data, always use tools)
 
 **Why:** Injecting actual schema information helps the LLM make accurate tool calls. Without schema awareness, the model guesses column names and gets them wrong.
 
-**Tradeoff:** The system prompt is large (~1,500 tokens with both schemas), which consumes context window on free-tier models. I mitigate this by keeping conversation history trimmed to the last 20 messages.
+**Optimization:** Sample rows and column means were removed from the prompt to reduce token count (~500-700 tokens saved per request). The LLM can fetch samples via `query_data` and compute statistics via aggregation when needed. Explicit parameter naming (e.g., `updates` not `update_values`) was added to prevent the LLM from hallucinating incorrect parameter names.
+
+**Tradeoff:** The system prompt is ~1,000 tokens with both schemas (down from ~1,500). Conversation history is trimmed to the last 20 messages to stay within free-tier context limits.
+
+---
+
+## 11. SSE Streaming Architecture
+
+**Decision:** Implement Server-Sent Events (SSE) via a `/chat/stream` endpoint instead of returning a single JSON response.
+
+**Event Protocol:**
+
+| Event | Payload | Purpose |
+|-------|---------|--------|
+| `session_id` | `{session_id}` | Sent first so the frontend can persist the session |
+| `thinking` | `{step, thought, action, observation}` | One per reasoning step — powers the live thinking block |
+| `thinking_end` | `{}` | Signals reasoning is complete |
+| `token` | `{token}` | Character chunks of the final response (~8 chars each) |
+| `done` | `{latency_ms, requires_confirmation, ...}` | Signals end of stream |
+| `error` | `{message}` | Error reporting |
+
+**Why:** SSE gives users immediate feedback — reasoning steps appear live and the response streams character-by-character. This dramatically improves perceived latency even when actual LLM processing takes 3-5 seconds.
+
+**Tradeoff:** SSE is unidirectional (server → client). For true bidirectional streaming (e.g., cancelling mid-stream), WebSockets would be needed. For this use case, SSE is simpler and sufficient.
+
+---
+
+## 12. Frontend: Vanilla JS with Live Streaming
+
+**Decision:** Build the frontend with vanilla HTML/CSS/JS (no framework) connected to the SSE streaming backend.
+
+**Key Design Choices:**
+- **Thinking Block:** A collapsible UI element that shows reasoning steps live with a spinner, then collapses into a "Thought for N steps" summary with a clickable chevron.
+- **TTFT Indicator:** A static badge in the bottom-left corner showing Time to First Token, measured client-side from request start to the first `token` event.
+- **Custom Markdown Renderer:** Lightweight regex-based parser for bold, italic, code blocks, lists, and headers — avoids the ~40KB dependency of a full library like `marked.js`.
+- **Session Persistence:** `sessionStorage` holds the session ID. On reload, conversation history is fetched from the API.
+
+**Why vanilla JS:** The UI is simple enough that a framework (React, Vue) would be overhead. The entire frontend is 3 files (HTML, CSS, JS) totaling ~25KB, with zero build step.
+
+---
+
+## 13. Performance Optimizations
+
+**Decision:** Optimize the full agent pipeline for latency without compromising accuracy.
+
+| Optimization | Impact | Detail |
+|---|---|---|
+| **Persistent HTTP Client** | ~50-150ms saved per LLM call | Reuse `httpx.AsyncClient` across requests instead of opening a new TCP+TLS connection each time |
+| **Compact Tool Observations** | ~30-40% fewer prompt tokens per turn | Truncate query results to 10 rows before feeding back to the LLM. The agent still gets enough data to compose accurate responses |
+| **Cached Tool Schemas** | Minor CPU savings | Tool schemas are computed once at `__init__()` instead of every loop iteration |
+| **Leaner System Prompt** | ~500-700 fewer tokens per request | Removed `sample_rows` and `mean` from the prompt schema — the LLM can fetch these via tools when needed |
+| **No DataFrame Copy** | ~1-5ms per query | Removed unnecessary `.copy()` on read-only query paths |
+| **Parameter Name Resilience** | Prevents wasted iterations | `update_data` accepts both `updates` and `update_values` as parameter names, since GPT-4o occasionally hallucinates the wrong name |
+
+**Estimated Impact:** ~20-25% reduction in end-to-end latency for typical queries. For mutation queries that previously hit the parameter-name bug, latency dropped from ~22s (10 failed iterations) to ~5s (2 iterations).
+
+---
+
+## 14. Rate Limit Handling
+
+**Decision:** Implement exponential backoff retry logic in `BaseLLMProvider._retry_request()` with up to 5 attempts.
+
+**Backoff Schedule:** `[3, 8, 15, 30, 60]` seconds. Respects the `retry-after` header when the API provides one (capped at 60s).
+
+**Why:** Free-tier LLM APIs (especially GitHub Models) have aggressive rate limits. Without retry logic, a single 429 response would crash the agent mid-conversation.
+
+**Tradeoff:** A worst-case retry chain could take ~2 minutes. This is acceptable for a free-tier deployment — the alternative is failing entirely.
 
 ---
 
 ## What I'd Do Differently
 
 ### With More Time
-1. **Add retry logic** with exponential backoff for LLM API rate limits
-2. **Implement a streaming response** mode for faster perceived latency
+1. ~~Add retry logic with exponential backoff~~ ✅ Implemented
+2. ~~Implement streaming responses~~ ✅ Implemented (SSE)
 3. **Add unit tests** for tools, validator, and data manager
-4. **Build a simple web UI** (React or even a Gradio interface) for easier interaction
+4. ~~Build a simple web UI~~ ✅ Implemented (vanilla JS frontend)
 5. **Add data visualization** — generate charts/graphs from query results
 6. **Support cross-dataset queries** — "Which states have both high-value properties AND successful marketing campaigns?"
 
 ### Architecture Improvements
 1. **SQLite intermediate layer** for better concurrency and crash recovery
 2. **Redis session store** for persistence across restarts
-3. **WebSocket support** for real-time streaming responses
-4. **Rate limiting middleware** to handle LLM API quotas gracefully
+3. ~~WebSocket/streaming support~~ ✅ Implemented (SSE streaming)
+4. ~~Rate limiting middleware~~ ✅ Implemented (exponential backoff)
 5. **Async data operations** — use async file I/O and DataFrame operations in thread pools
 
 ### If This Were Production

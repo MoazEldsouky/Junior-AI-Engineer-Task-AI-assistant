@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # --- Agent ---
-    max_agent_iterations: int = 10
+    max_agent_iterations: int = 5
     session_ttl_minutes: int = 60
     max_history_messages: int = 20
 
