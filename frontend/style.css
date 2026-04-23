@@ -696,6 +696,7 @@ body {
     color: white;
     width: 2.75rem;
     height: 2.75rem;
+    padding: 0;
     border-radius: var(--radius-md);
     display: flex;
     align-items: center;
