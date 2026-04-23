@@ -26,6 +26,7 @@ graph TD
     LLM --> OR[OpenRouter]
     LLM --> GH[GitHub Models]
     Agent --> TR[Tool Registry]
+    
     TR --> T1[QueryTool]
     TR --> T2[InsertTool]
     TR --> T3[UpdateTool]
@@ -33,10 +34,14 @@ graph TD
     TR --> T5[SchemaInspectTool]
     TR --> T6[UndoTool]
     TR --> T7[ListChangesTool]
-    T1 & T2 & T3 & T4 & T5 & T6 & T7 --> DM[Data Manager]
+    TR --> T8[AddColumnTool]
+
+    T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 --> DM[Data Manager]
     DM --> Excel[(Excel Files via pandas)]
-    T2 & T3 & T4 --> V[Validator]
-    T2 & T3 & T4 --> WL[Write Log - JSON]
+    
+    T2 & T3 & T4 & T8 --> V[Validator]
+    T2 & T3 & T4 & T8 --> WL[Write Log - JSON]
+    
     API --> SL[Structured Logger]
 ```
 
