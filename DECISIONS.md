@@ -14,9 +14,9 @@ This document explains the key design decisions made in building the AI Agent Ex
 
 ---
 
-## 2. Tool Granularity: 7 Specialized Tools
+## 2. Tool Granularity: 8 Specialized Tools
 
-**Decision:** Create 7 focused tools rather than one generic "execute SQL" tool.
+**Decision:** Create 8 focused tools rather than one generic "execute SQL" tool.
 
 | Tool | Purpose |
 |------|---------|
@@ -27,10 +27,11 @@ This document explains the key design decisions made in building the AI Agent Ex
 | `inspect_schema` | Describe available data |
 | `undo_change` | Revert mutations |
 | `list_changes` | Review mutation history |
+| `add_column` | Add a new column computed via formula |
 
 **Why:** Specialized tools with clear parameter schemas guide the LLM to make better decisions. A generic tool would require the LLM to generate complex query syntax, increasing error rates. Each tool has explicit validation, preview logic, and safety checks that wouldn't fit cleanly in a single tool.
 
-**Tradeoff:** More tools means a larger function-calling schema for the LLM to process. For free-tier models with limited context, this adds token overhead. In practice, 7 tools is well within the capacity of models like Gemini Flash and Llama 3.3.
+**Tradeoff:** More tools means a larger function-calling schema for the LLM to process. For free-tier models with limited context, this adds token overhead. In practice, 8 tools is well within the capacity of models like Gemini Flash and Llama 3.3.
 
 ---
 
@@ -88,7 +89,7 @@ This document explains the key design decisions made in building the AI Agent Ex
 
 ## 6. Preview + Confirmation: Structurally Enforced State Machine
 
-**Decision:** Every data mutation (insert/update/delete/undo) returns a human-readable preview and requires explicit "yes/no" confirmation before executing. Confirmations happen **inline in the chat** — no modal popups. The confirmation is now **structurally enforced** through an `AgentState` enum (see §16).
+**Decision:** Every data mutation (insert/update/delete/undo/add-column) returns a human-readable preview and requires explicit "yes/no" confirmation before executing. Confirmations happen **inline in the chat** — no modal popups. The confirmation is now **structurally enforced** through an `AgentState` enum (see §16).
 
 **Why:** This is critical for user trust. The before/after comparison format makes changes immediately understandable:
 
@@ -285,7 +286,7 @@ IDLE → AWAITING_CONFIRMATION → COMMITTING → IDLE
 | `session.begin_commit()` | `_handle_confirmation()` | Raises `RuntimeError` if state ≠ AWAITING_CONFIRMATION |
 | `_execute_confirmed_mutation()` | Only called from `_handle_confirmation()` | Executes the actual DataManager write |
 
-**Blocked Tools:** `insert_data`, `update_data`, `delete_data`, `undo_change` — defined in `session.MUTATING_TOOLS`.
+**Blocked Tools:** `insert_data`, `update_data`, `delete_data`, `undo_change`, `add_column` — defined in `session.MUTATING_TOOLS`.
 
 **Why:** The previous system relied on the LLM to "choose" to ask for confirmation before mutating. A hallucinating or misbehaving LLM could theoretically skip the confirmation step and call `update_data` directly. Now this is architecturally impossible — the state machine enforces the invariant at the Python level, not the prompt level.
 

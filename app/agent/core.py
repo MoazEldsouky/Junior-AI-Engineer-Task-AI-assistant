@@ -458,6 +458,14 @@ class Agent:
                     f"Use query_data on dataset '{dataset}' to fetch and display the reverted "
                     f"record(s) in a markdown table as required."
                 )
+            elif op == "add_column":
+                column_name = pending.data.get("column_name", "")
+                follow_up = (
+                    f"[SYSTEM] Mutation succeeded: {mutation_result}\n"
+                    f"Column '{column_name}' has been added to all rows in dataset '{dataset}'. "
+                    f"Use query_data on dataset '{dataset}' with columns including '{column_name}' "
+                    f"to show a sample of rows with the new column in a markdown table."
+                )
             else:
                 follow_up = (
                     f"[SYSTEM] Mutation succeeded: {mutation_result}\n"
@@ -677,6 +685,21 @@ class Agent:
                 return (
                     f"✅ Successfully undone {result['operation']} — "
                     f"{result['undone_count']} row(s) reverted."
+                )
+
+            elif op == "add_column":
+                result = self.dm.add_column(
+                    data["dataset"],
+                    data["column_name"],
+                    formula=data.get("formula"),
+                    default_value=data.get("default_value"),
+                )
+                if "error" in result:
+                    return f"❌ {result['error']}"
+                return (
+                    f"✅ Successfully added column '{result['column_name']}' "
+                    f"to {result['total_rows']:,} rows. "
+                    f"(Action ID: {result['action_id']} — use this to undo if needed)"
                 )
 
             else:

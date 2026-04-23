@@ -142,6 +142,63 @@ def format_insert_preview(
     return "\n".join(lines)
 
 
+def format_add_column_preview(
+    dataset_key: str,
+    column_name: str,
+    formula: str | None,
+    default_value: Any,
+    preview_data: dict[str, Any],
+) -> str:
+    """
+    Build a rich staged add-column preview.
+
+    Example output:
+        📊 CONFIRMATION: STAGED EXCEL ADD COLUMN
+        ──────────────────────────────────────────────────
+        📁 File: Real Estate Listings.xlsx
+
+        New Column : "Rooms"
+        Formula    : Bedrooms + Bathrooms
+        Rows       : 200
+
+        Sample Values (first 5 rows):
+          1 → 4
+          2 → 3
+          3 → 5
+          4 → 2
+          5 → 4
+
+        Add this column to all 200 rows? (yes/no)
+    """
+    filename, display_name, id_col = _get_dataset_meta(dataset_key)
+    total_rows = preview_data.get("total_rows", 0)
+    sample = preview_data.get("sample_values", [])
+    sep = "──────────────────────────────────────────────────"
+
+    lines = [
+        "📊 CONFIRMATION: STAGED EXCEL ADD COLUMN",
+        sep,
+        f"📁 File: {filename}",
+        "",
+        f" New Column : {_fmt_value(column_name)}",
+    ]
+    if formula:
+        lines.append(f" Formula    : {formula}")
+    else:
+        lines.append(f" Default    : {_fmt_value(default_value)}")
+    lines.append(f" Rows       : {total_rows:,}")
+
+    if sample:
+        lines.append("")
+        lines.append(" Sample Values (first 5 rows):")
+        for i, val in enumerate(sample, 1):
+            lines.append(f"   {i} → {_fmt_value(val)}")
+
+    lines.append("")
+    lines.append(f"Add this column to all {total_rows:,} rows? (yes/no)")
+    return "\n".join(lines)
+
+
 def format_delete_preview(
     dataset_key: str,
     preview_data: dict[str, Any],

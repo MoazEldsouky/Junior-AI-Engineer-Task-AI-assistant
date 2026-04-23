@@ -15,6 +15,7 @@ Built from scratch with **no agent frameworks** (no LangChain, LlamaIndex, etc.)
 | **Preview + Confirmation**                  | Every mutation shows a before/after preview and requires explicit confirmation           |
 | **Structurally Enforced Confirmation**      | State machine (`IDLE → AWAITING_CONFIRMATION → COMMITTING`) — the LLM cannot bypass it  |
 | **Dynamic Schema & Range Overrides**        | Add new property types or bypass range limits with user confirmation                     |
+| **Add New Columns**                         | Create new columns using mathematical formulas or default values                         |
 | **Undo System**                             | Full mutation log with undo support for any past change                                  |
 | **Post-Mutation Display**                   | Automatically queries and renders affected rows in Markdown tables after mutations       |
 | **Data Validation**                         | Type checking, range constraints, and enum validation before mutations                   |
@@ -72,7 +73,7 @@ OPENROUTER_API_KEY=your-key  # https://openrouter.ai/keys
 GITHUB_TOKEN=your-pat        # https://github.com/settings/tokens
 
 # Set active provider
-LLM_PROVIDER=GITHUB_TOKEN
+LLM_PROVIDER=github_models
 LLM_MODEL=gpt-4o
 ```
 
@@ -187,6 +188,7 @@ curl -X POST http://localhost:8000/chat \
 | Method     | Endpoint                   | Description                             |
 | ---------- | -------------------------- | --------------------------------------- |
 | `POST`   | `/chat`                  | Send a message to the agent             |
+| `POST`   | `/chat/stream`           | Stream reasoning + response via SSE     |
 | `POST`   | `/chat/confirm`          | Confirm or cancel a pending mutation    |
 | `GET`    | `/sessions/{id}/history` | Get conversation history                |
 | `DELETE` | `/sessions/{id}`         | Delete a session                        |
@@ -209,6 +211,7 @@ All capabilities are implemented as custom tools that the agent dynamically sele
 | `inspect_schema` | Describe datasets, columns, and data types     |
 | `undo_change`    | Revert any previous mutation                   |
 | `list_changes`   | Show mutation history with action IDs          |
+| `add_column`     | Add a new column using a formula or default value |
 
 ---
 
@@ -239,7 +242,7 @@ User → FastAPI → Session Manager → Agent (ReAct Loop) → LLM Provider
 IDLE → AWAITING_CONFIRMATION → COMMITTING → IDLE
 ```
 
-Mutating tools (`insert_data`, `update_data`, `delete_data`, `undo_change`) are blocked at the code level while the session is in `AWAITING_CONFIRMATION`. The LLM cannot bypass this — even if it hallucinates a direct tool call.
+Mutating tools (`insert_data`, `update_data`, `delete_data`, `undo_change`, `add_column`) are blocked at the code level while the session is in `AWAITING_CONFIRMATION`. The LLM cannot bypass this — even if it hallucinates a direct tool call.
 
 **LLM Provider Hierarchy**: Providers follow a clean inheritance model:
 
@@ -280,7 +283,8 @@ All OpenAI-compatible providers share a single `generate()` + `_parse_openai_res
 │   │   ├── delete.py        # DeleteTool
 │   │   ├── schema_inspect.py # SchemaInspectTool
 │   │   ├── undo.py          # UndoTool
-│   │   └── list_changes.py  # ListChangesTool
+│   │   ├── list_changes.py  # ListChangesTool
+│   │   └── add_column.py    # AddColumnTool (formula evaluation)
 │   ├── data/
 │   │   ├── manager.py       # DataManager (load/save/query)
 │   │   └── validator.py     # Validation engine + EnumProposal

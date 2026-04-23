@@ -396,6 +396,70 @@ class DataManager:
         return {"action_id": action_id, "deleted_count": len(deleted_records)}
 
     # -----------------------------------------------------------------
+    # Add Column
+    # -----------------------------------------------------------------
+
+    def get_add_column_preview(
+        self,
+        dataset: str,
+        column_name: str,
+        formula: str | None = None,
+        default_value: Any = None,
+    ) -> dict[str, Any]:
+        key = self.resolve_dataset(dataset)
+        df = self._dataframes[key]
+        if column_name in df.columns:
+            return {"error": f"Column '{column_name}' already exists in the dataset."}
+        try:
+            if formula:
+                computed = df.eval(formula)
+                sample = computed.head(5).tolist()
+            else:
+                sample = [default_value] * min(5, len(df))
+        except Exception as e:
+            return {"error": f"Formula evaluation error: {e}"}
+        return {
+            "column_name": column_name,
+            "formula": formula,
+            "default_value": default_value,
+            "total_rows": len(df),
+            "sample_values": sample,
+        }
+
+    def add_column(
+        self,
+        dataset: str,
+        column_name: str,
+        formula: str | None = None,
+        default_value: Any = None,
+    ) -> dict[str, Any]:
+        key = self.resolve_dataset(dataset)
+        with self._lock:
+            df = self._dataframes[key]
+            if column_name in df.columns:
+                return {"error": f"Column '{column_name}' already exists."}
+            if formula:
+                df[column_name] = df.eval(formula)
+            else:
+                df[column_name] = default_value
+            self._dataframes[key] = df
+            self._save(key)
+        action_id = f"act_{uuid.uuid4().hex[:8]}"
+        log_entry = {
+            "action_id": action_id,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "operation": "add_column",
+            "dataset": key,
+            "column_name": column_name,
+            "formula": formula,
+            "default_value": str(default_value) if default_value is not None else None,
+            "affected_rows": [],
+            "undone": False,
+        }
+        self._append_write_log(log_entry)
+        return {"action_id": action_id, "column_name": column_name, "total_rows": len(df)}
+
+    # -----------------------------------------------------------------
     # Undo
     # -----------------------------------------------------------------
 
@@ -419,13 +483,16 @@ class DataManager:
                 return {"error": f"Action {action_id} has already been undone."}
         else:
             return {"error": "Specify action_id or set latest=true."}
-        return {
+        result = {
             "action_id": entry["action_id"],
             "operation": entry["operation"],
             "dataset": entry["dataset"],
             "timestamp": entry["timestamp"],
-            "affected_rows": entry["affected_rows"],
+            "affected_rows": entry.get("affected_rows", []),
         }
+        if entry["operation"] == "add_column":
+            result["column_name"] = entry.get("column_name")
+        return result
 
     def undo(self, action_id: str | None = None, latest: bool = False) -> dict[str, Any]:
         log = self._read_write_log()
@@ -472,6 +539,10 @@ class DataManager:
                     if col in df.columns and df[col].dtype == "datetime64[ns]":
                         restored[col] = pd.to_datetime(restored[col], errors="coerce")
                 df = pd.concat([df, restored], ignore_index=True)
+            elif operation == "add_column":
+                col = entry.get("column_name")
+                if col and col in df.columns:
+                    df = df.drop(columns=[col])
             self._dataframes[key] = df.reset_index(drop=True)
             self._save(key)
         log[entry_idx]["undone"] = True

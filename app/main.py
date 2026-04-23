@@ -30,6 +30,7 @@ from app.tools.delete import DeleteTool
 from app.tools.schema_inspect import SchemaInspectTool
 from app.tools.undo import UndoTool
 from app.tools.list_changes import ListChangesTool
+from app.tools.add_column import AddColumnTool
 from app.llm.base import get_provider
 from app.agent.core import Agent
 from app.agent.session import SessionManager
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
     registry.register(SchemaInspectTool(data_manager))
     registry.register(UndoTool(data_manager))
     registry.register(ListChangesTool(data_manager))
+    registry.register(AddColumnTool(data_manager))
     logger.info(f"🔧 Registered {len(registry.list_names())} tools: {registry.list_names()}")
 
     # 4. LLM Provider

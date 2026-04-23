@@ -118,6 +118,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset({
     "update_data",
     "delete_data",
     "undo_change",
+    "add_column",
 })
 
 
