@@ -8,7 +8,19 @@ Built from scratch with **no agent frameworks** (no LangChain, LlamaIndex, etc.)
 
 ## ✨ Features
 
-FeatureDescription**Natural Language Queries**Ask anything about your data in plain English**CRUD Operations**Insert, update, and delete rows via chat**Preview + Confirmation**Every mutation shows a before/after preview and requires explicit confirmation**Undo System**Full mutation log with undo support for any past change**Data Validation**Type checking, range constraints, and enum validation before mutations**Multi-Turn Conversations**Session memory for follow-up questions**Multiple LLM Providers**Gemini, Groq, OpenRouter, GitHub Models — switch freely**Structured Logging**Every interaction logged as JSON for full traceability**REST API**Clean FastAPI endpoints with auto-generated docs
+| Feature | Description | 
+|-------------------|---------------|
+| **Natural Language Queries**              | Ask anything about your data in plain English                                            |
+| **CRUD Operations**                         | Insert, update, and delete rows via chat                                                 |
+| **Preview + Confirmation**                  | Every mutation shows a before/after preview and requires explicit confirmation           |
+| **Structurally Enforced Confirmation**      | State machine (`IDLE → AWAITING_CONFIRMATION → COMMITTING`) — the LLM cannot bypass it  |
+| **Dynamic Enum Extension**                  | Add new property types (e.g., "Twitter" as a Channel) with user confirmation             |
+| **Undo System**                             | Full mutation log with undo support for any past change                                  |
+| **Data Validation**                         | Type checking, range constraints, and enum validation before mutations                   |
+| **Multi-Turn Conversations**                | Session memory for follow-up questions                                                   |
+| **Multiple LLM Providers**                  | Gemini, Groq, OpenRouter, GitHub Models — switch freely                                  |
+| **Structured Logging**                      | Every interaction logged as JSON for full traceability                                   |
+| **REST API**                              | Clean FastAPI endpoints with auto-generated docs                                       |
 
 ---
 
@@ -59,8 +71,8 @@ OPENROUTER_API_KEY=your-key  # https://openrouter.ai/keys
 GITHUB_TOKEN=your-pat        # https://github.com/settings/tokens
 
 # Set active provider
-LLM_PROVIDER=groq
-LLM_MODEL=llama-3.3-70b-versatile
+LLM_PROVIDER=GITHUB_TOKEN
+LLM_MODEL=gpt-4o
 ```
 
 ### 4. Start the Server
@@ -206,6 +218,27 @@ User → FastAPI → Session Manager → Agent (ReAct Loop) → LLM Provider
 
 **LLM Abstraction**: All providers implement the same interface. The agent never knows which LLM is active — you can switch providers by changing one env variable.
 
+**Confirmation State Machine**: Every mutation passes through a structurally enforced state machine:
+
+```
+IDLE → AWAITING_CONFIRMATION → COMMITTING → IDLE
+```
+
+Mutating tools (`insert_data`, `update_data`, `delete_data`, `undo_change`) are blocked at the code level while the session is in `AWAITING_CONFIRMATION`. The LLM cannot bypass this — even if it hallucinates a direct tool call.
+
+**LLM Provider Hierarchy**: Providers follow a clean inheritance model:
+
+```
+BaseLLMProvider (abstract)
+├── GeminiProvider             ← Google GenAI SDK
+└── OpenAICompatibleProvider   ← shared generate/parse
+    ├── GroqProvider
+    ├── GitHubModelsProvider
+    └── OpenRouterProvider
+```
+
+All OpenAI-compatible providers share a single `generate()` + `_parse_openai_response()` implementation. Each subclass declares only its API URL and optional headers.
+
 ---
 
 ## 📁 Project Structure
@@ -215,29 +248,30 @@ User → FastAPI → Session Manager → Agent (ReAct Loop) → LLM Provider
 │   ├── main.py              # FastAPI server + endpoints
 │   ├── config.py            # Settings from .env
 │   ├── agent/
-│   │   ├── core.py          # ReAct reasoning loop
+│   │   ├── core.py          # ReAct reasoning loop + state-machine confirmation
 │   │   ├── prompt.py        # System prompts
-│   │   └── session.py       # Session & conversation memory
+│   │   └── session.py       # Session, AgentState enum, & conversation memory
 │   ├── llm/
-│   │   ├── base.py          # Abstract LLM provider
-│   │   ├── gemini.py        # Google Gemini
-│   │   ├── groq.py          # Groq
-│   │   ├── openrouter.py    # OpenRouter
-│   │   └── github_models.py # GitHub Models (Azure)
+│   │   ├── base.py          # BaseLLMProvider + OpenAICompatibleProvider
+│   │   ├── gemini.py        # Google Gemini (separate SDK)
+│   │   ├── groq.py          # Groq (thin subclass)
+│   │   ├── openrouter.py    # OpenRouter (thin subclass)
+│   │   └── github_models.py # GitHub Models (thin subclass)
 │   ├── tools/
 │   │   ├── base.py          # BaseTool + ToolRegistry
 │   │   ├── query.py         # QueryTool
-│   │   ├── insert.py        # InsertTool
-│   │   ├── update.py        # UpdateTool
+│   │   ├── insert.py        # InsertTool (with enum extension support)
+│   │   ├── update.py        # UpdateTool (with enum extension support)
 │   │   ├── delete.py        # DeleteTool
 │   │   ├── schema_inspect.py # SchemaInspectTool
 │   │   ├── undo.py          # UndoTool
 │   │   └── list_changes.py  # ListChangesTool
 │   ├── data/
 │   │   ├── manager.py       # DataManager (load/save/query)
-│   │   └── validator.py     # Validation engine
+│   │   └── validator.py     # Validation engine + EnumProposal
 │   └── logging/
 │       └── logger.py        # Structured JSON logger
+├── frontend/                # Vanilla JS chat UI
 ├── data/                    # Runtime data (write-log)
 ├── logs/                    # Interaction logs
 ├── notebooks/

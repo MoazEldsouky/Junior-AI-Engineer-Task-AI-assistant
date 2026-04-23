@@ -45,7 +45,7 @@ def format_update_preview(
     Build a rich staged-update preview.
 
     Example output:
-        📊 STAGED EXCEL UPDATE (2 Rows)
+        📊 CONFIRMATION: STAGED EXCEL UPDATE (2 Rows)
         ──────────────────────────────────────────────────
         📁 File: Real Estate Listings.xlsx
 
@@ -62,7 +62,7 @@ def format_update_preview(
     sep = "──────────────────────────────────────────────────"
 
     lines = [
-        f"📊 STAGED EXCEL UPDATE ({count} Row{'s' if count != 1 else ''})",
+        f"📊 CONFIRMATION: STAGED EXCEL UPDATE ({count} Row{'s' if count != 1 else ''})",
         sep,
         f"📁 File: {filename}",
         "",
@@ -102,7 +102,7 @@ def format_insert_preview(
     Build a rich staged-insert preview.
 
     Example output:
-        📊 STAGED EXCEL INSERT (1 Row)
+        📊 CONFIRMATION: STAGED EXCEL INSERT (1 Row)
         ──────────────────────────────────────────────────
         📁 File: Real Estate Listings.xlsx
 
@@ -118,7 +118,7 @@ def format_insert_preview(
     sep = "──────────────────────────────────────────────────"
 
     lines = [
-        f"📊 STAGED EXCEL INSERT ({count} Row{'s' if count != 1 else ''})",
+        f"📊 CONFIRMATION: STAGED EXCEL INSERT ({count} Row{'s' if count != 1 else ''})",
         sep,
         f"📁 File: {filename}",
     ]
@@ -151,7 +151,7 @@ def format_delete_preview(
     Build a rich staged-delete preview.
 
     Example output:
-        📊 STAGED EXCEL DELETE (3 Rows)
+        📊 CONFIRMATION: STAGED EXCEL DELETE (3 Rows)
         ──────────────────────────────────────────────────
         📁 File: Marketing Campaigns.xlsx
 
@@ -170,7 +170,7 @@ def format_delete_preview(
     sep = "──────────────────────────────────────────────────"
 
     lines = [
-        f"📊 STAGED EXCEL DELETE ({count} Row{'s' if count != 1 else ''})",
+        f"📊 CONFIRMATION: STAGED EXCEL DELETE ({count} Row{'s' if count != 1 else ''})",
         sep,
         f"📁 File: {filename}",
         "",

@@ -41,8 +41,8 @@ This document explains the key design decisions made in building the AI Agent Ex
 **Why:** The task requires supporting 4+ LLM providers. By normalizing everything to OpenAI-style messages + tool schemas, the agent code is completely decoupled from the provider. Switching from Groq to Gemini is a one-line `.env` change.
 
 **Implementation Details:**
-- OpenAI-compatible APIs (Groq, OpenRouter, GitHub Models) share the same message format natively
-- Gemini requires explicit schema/message conversion, handled in its provider class
+- OpenAI-compatible APIs (Groq, OpenRouter, GitHub Models) share request format, response structure, and parsing logic — all consolidated into a single `OpenAICompatibleProvider` base class (see §15)
+- Gemini uses a completely different SDK (Google Generative AI) and remains its own separate `GeminiProvider` implementation
 - All responses normalize to `LLMResponse(content, tool_calls, usage)`
 
 **Tradeoff:** Some Gemini-specific features (like grounding, multi-modal) aren't accessible through this abstraction. For this task, text + function calling is all we need.
@@ -67,23 +67,28 @@ This document explains the key design decisions made in building the AI Agent Ex
 
 ---
 
-## 5. Validation: Fail-Fast with Clear Errors
+## 5. Validation: Fail-Fast with Clear Errors + Dynamic Enum Extension
 
-**Decision:** Every mutation passes through a `Validator` that checks types, ranges, enums, and required fields before any data is touched.
+**Decision:** Every mutation passes through a `Validator` that checks types, ranges, enums, and required fields before any data is touched. Unknown enum values now trigger a **confirmation-based extension flow** rather than a hard rejection (see §17).
 
 **Why:** Catching errors before they reach the database prevents corrupted data and gives users actionable feedback. The validator knows the schema constraints (e.g., Property Type must be House/Condo/Apartment/Townhouse) and returns specific error messages.
 
+**Tradeoff:**
+* ~~**Strict vs. Flexible Schemas:** Strict rules prevent users from adding their own custom categories on the fly.~~ **Resolved:** Users can now add new enum values (e.g., "Twitter" as a Channel) through a two-step confirmation flow that ensures they understand they are permanently extending the schema.
+* **Data Quality:** The confirmation step preserves data integrity — users can't accidentally add junk values, but they *can* intentionally extend the schema when needed.
+
 **Design Choices:**
 - **Enum validation** with case-insensitive matching (auto-corrects "house" → "House")
+- **Dynamic enum extension** via `EnumProposal` + user confirmation (see §17)
 - **Date parsing** with multiple format support (YYYY-MM-DD, MM/DD/YYYY, etc.)
 - **Range checks** on numeric columns (e.g., Year Built: 1800–current year)
-- **Warnings vs. Errors:** Soft issues (type coercion) are warnings; hard violations (wrong enum) are errors
+- **Warnings vs. Errors:** Soft issues (type coercion) are warnings; hard violations (wrong enum) are errors; unknown enums are proposals
 
 ---
 
-## 6. Preview + Confirmation: Inline Chat Confirmation
+## 6. Preview + Confirmation: Structurally Enforced State Machine
 
-**Decision:** Every data mutation (insert/update/delete/undo) returns a human-readable preview and requires explicit "yes/no" confirmation before executing. Confirmations happen **inline in the chat** — no modal popups.
+**Decision:** Every data mutation (insert/update/delete/undo) returns a human-readable preview and requires explicit "yes/no" confirmation before executing. Confirmations happen **inline in the chat** — no modal popups. The confirmation is now **structurally enforced** through an `AgentState` enum (see §16).
 
 **Why:** This is critical for user trust. The before/after comparison format makes changes immediately understandable:
 
@@ -92,9 +97,11 @@ Record 'LST-5001':
   List Price: 351000 → 482000
 ```
 
-**Implementation:** Tools return `requires_confirmation=True` with a preview string. The agent core stores a `PendingConfirmation` in the session. The next user message is interpreted as yes/no (with fuzzy matching for natural language like "go ahead", "sure", etc.).
+**Implementation:** Tools return `requires_confirmation=True` with a preview string. The session transitions to `AWAITING_CONFIRMATION` state via `session.request_confirmation()`. While in this state, mutating tools are **structurally blocked** — even if the LLM hallucinates a direct tool call, it will be intercepted and rejected. The only path to executing the mutation is through `_handle_confirmation()` → `session.begin_commit()` → `_execute_confirmed_mutation()`, which enforces the `AWAITING_CONFIRMATION → COMMITTING → IDLE` state transition.
 
 **Earlier approach (discarded):** A modal popup intercepted mutation responses and presented Confirm/Cancel buttons. This was removed because it broke the natural chat flow — users expect to respond conversationally, not via UI dialogs.
+
+**Previous approach (replaced):** The confirmation was implicitly handled — the LLM decided when to ask for confirmation. A misbehaving LLM could skip it. Now the state machine makes this architecturally impossible.
 
 **Tradeoff:** Adds one extra round-trip for mutations. This is intentional — the alternative (auto-executing) is risky for destructive operations.
 
@@ -223,6 +230,97 @@ Record 'LST-5001':
 
 ---
 
+## 15. Provider Deduplication: OpenAICompatibleProvider
+
+**Decision:** Consolidate all OpenAI-compatible providers (Groq, GitHub Models, OpenRouter) into a single `OpenAICompatibleProvider` base class. Each concrete provider is now a thin subclass (~10 lines) that declares only its API URL and any extra headers.
+
+**Before:**
+```
+GroqProvider      → 93 lines (generate + _parse_openai_response)
+GitHubModelsProvider → 96 lines (identical generate + parse)
+OpenRouterProvider   → 97 lines (identical generate + parse)
+```
+
+**After:**
+```
+OpenAICompatibleProvider → ~80 lines (generate + parse, shared)
+GroqProvider             → 5 lines  (_api_url only)
+GitHubModelsProvider     → 5 lines  (_api_url only)
+OpenRouterProvider       → 8 lines  (_api_url + _extra_headers)
+```
+
+**Class Hierarchy:**
+```
+BaseLLMProvider (abstract)
+├── GeminiProvider             ← Google GenAI SDK (structurally different)
+└── OpenAICompatibleProvider   ← shared generate/parse logic
+    ├── GroqProvider
+    ├── GitHubModelsProvider
+    └── OpenRouterProvider
+```
+
+**Why:** All three providers used the exact same request format, response structure, and parsing logic. If you needed to fix a parsing bug or add streaming support, you had to edit 3 files. Now you edit one. Gemini remains separate because it uses a completely different API (Google Generative AI SDK).
+
+**Tradeoff:** Slightly deeper inheritance hierarchy. But the alternative (3 identical copies) was a clear maintenance liability.
+
+---
+
+## 16. Structurally Enforced Confirmation: AgentState Machine
+
+**Decision:** Add a formal `AgentState` enum to `Session` with three states: `IDLE`, `AWAITING_CONFIRMATION`, `COMMITTING`. The system **literally cannot** reach `COMMITTING` without passing through `AWAITING_CONFIRMATION`.
+
+**State Transitions:**
+```
+IDLE → AWAITING_CONFIRMATION → COMMITTING → IDLE
+                             ↑
+                       only path to a write
+```
+
+**Guard Layers:**
+
+| Guard | Location | What It Does |
+|---|---|---|
+| `session.is_tool_blocked(name)` | Agent ReAct loop | Rejects mutating tools if state ≠ IDLE |
+| `session.begin_commit()` | `_handle_confirmation()` | Raises `RuntimeError` if state ≠ AWAITING_CONFIRMATION |
+| `_execute_confirmed_mutation()` | Only called from `_handle_confirmation()` | Executes the actual DataManager write |
+
+**Blocked Tools:** `insert_data`, `update_data`, `delete_data`, `undo_change` — defined in `session.MUTATING_TOOLS`.
+
+**Why:** The previous system relied on the LLM to "choose" to ask for confirmation before mutating. A hallucinating or misbehaving LLM could theoretically skip the confirmation step and call `update_data` directly. Now this is architecturally impossible — the state machine enforces the invariant at the Python level, not the prompt level.
+
+**Tradeoff:** Slightly more complex session logic. But the safety guarantee is worth it — no amount of prompt injection can bypass a Python `RuntimeError`.
+
+---
+
+## 17. Dynamic Enum Extension with Confirmation
+
+**Decision:** Allow users to add new enum values (e.g., "Twitter" as a Channel) through a **two-step confirmation flow**, rather than rejecting them outright.
+
+**Flow:**
+
+```
+1. User provides unknown enum value (e.g., Channel="Twitter")
+2. Validator detects it → creates EnumProposal (not a hard error)
+3. Tool returns requires_confirmation=True with explicit warning:
+   ⚠️ New Property Type Warning
+   • Channel: "Twitter" is not one of [Facebook, Instagram, ...]
+   Adding this will permanently extend the dataset schema.
+4. Session transitions to AWAITING_CONFIRMATION (same state machine)
+5. User confirms → extend_enum() adds "Twitter" to COLUMN_SCHEMAS
+6. Insert/update proceeds normally
+```
+
+**Key Types:**
+- `EnumProposal(dataset, column, proposed_value, current_values)` — proposal data
+- `ValidationResult.new_enum_proposals` — list of proposals requiring confirmation
+- `extend_enum(dataset, column, new_value)` — permanently adds value to schema
+
+**Why:** The original validator was too rigid — users couldn't add legitimate new values (e.g., a "Twitter" marketing channel that didn't exist when the dataset was created). But auto-accepting any value risks data corruption ("twiter", "TWITTER", etc.). The confirmation step strikes the right balance: explicit intent + schema integrity.
+
+**Tradeoff:** Enum extensions are in-memory — if the server restarts, the schema reverts to defaults. For production, the extended schema should be persisted to a config file or database.
+
+---
+
 ## What I'd Do Differently
 
 ### With More Time
@@ -238,7 +336,11 @@ Record 'LST-5001':
 2. **Redis session store** for persistence across restarts
 3. ~~WebSocket/streaming support~~ ✅ Implemented (SSE streaming)
 4. ~~Rate limiting middleware~~ ✅ Implemented (exponential backoff)
-5. **Async data operations** — use async file I/O and DataFrame operations in thread pools
+5. ~~Deduplicate OpenAI-compatible provider code~~ ✅ Implemented (`OpenAICompatibleProvider`)
+6. ~~Structurally enforce confirmation flow~~ ✅ Implemented (`AgentState` machine)
+7. ~~Allow dynamic enum extension with user consent~~ ✅ Implemented (`EnumProposal` flow)
+8. **Async data operations** — use async file I/O and DataFrame operations in thread pools
+9. **Persist extended enum schemas** — save user-confirmed enum additions to a config file
 
 ### If This Were Production
 1. **Authentication** — API keys, JWT tokens, or OAuth

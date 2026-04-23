@@ -3,6 +3,25 @@ Agent Core — the ReAct reasoning loop.
 
 Orchestrates the interaction between the user, the LLM, and the tools.
 Follows a Reason → Act → Observe loop with explicit reasoning traces.
+
+Confirmation Flow (structurally enforced)
+-----------------------------------------
+Any mutation tool (insert_data, update_data, delete_data, undo_change)
+returns requires_confirmation=True.  The agent calls
+session.request_confirmation() which transitions the session to
+AgentState.AWAITING_CONFIRMATION.
+
+While the session is in that state:
+  • session.is_tool_blocked(name) returns True for every mutating tool,
+    so the LLM *cannot* sneak past confirmation by calling the tool again.
+  • The only code path that can reach the actual DataManager write is
+    _execute_confirmed_mutation(), which first calls session.begin_commit()
+    — and begin_commit() raises RuntimeError if the session is NOT in
+    AWAITING_CONFIRMATION state.
+
+Therefore: IDLE → AWAITING_CONFIRMATION → COMMITTING → IDLE
+                                        ↑
+                                  only path to a write
 """
 
 from __future__ import annotations
@@ -14,16 +33,16 @@ from typing import Any
 
 from app.llm.base import BaseLLMProvider, LLMResponse, get_provider
 from app.tools.base import ToolRegistry, ToolResult
-from app.agent.session import Session, Message, PendingConfirmation
+from app.agent.session import Session, Message, PendingConfirmation, AgentState
 from app.agent.prompt import build_system_prompt
 from app.data.manager import DataManager
+from app.data.validator import extend_enum, RangeProposal
 from app.logging.logger import InteractionLogger
+from app.config import settings
 
+import logging
 
-# Maximum rows to include in tool observation messages sent to the LLM.
-# Keeps token count manageable while still giving the model enough data
-# to compose an accurate response.
-MAX_OBSERVATION_ROWS = 10
+logger = logging.getLogger("agent")
 
 
 @dataclass
@@ -58,7 +77,8 @@ class Agent:
     4. LLM returns text and/or tool calls
     5. If tool calls → execute tools → feed results back → repeat
     6. If text only → return as final answer
-    7. If tool requires confirmation → pause and return preview
+    7. If tool requires confirmation → pause; session transitions to
+       AWAITING_CONFIRMATION; mutating tools are blocked until user confirms.
     """
 
     def __init__(
@@ -98,8 +118,12 @@ class Agent:
         if not session.history or session.history[0].role != "system":
             session.add_message(Message(role="system", content=self.system_prompt))
 
-        # Handle confirmation responses
-        if session.pending_confirmation:
+        # -----------------------------------------------------------------
+        # If the session is AWAITING_CONFIRMATION, route to the confirmation
+        # handler regardless of what the user said.  The LLM has no way to
+        # bypass this — the state is checked here, not inside a tool.
+        # -----------------------------------------------------------------
+        if session.is_awaiting_confirmation:
             return await self._handle_confirmation(
                 session, user_message, start_time
             )
@@ -150,6 +174,38 @@ class Agent:
 
                 # Execute each tool call
                 for tc in llm_response.tool_calls:
+                    # ----------------------------------------------------------
+                    # Structural guard: if a mutating tool is called while we
+                    # are AWAITING_CONFIRMATION, block it outright.  This can
+                    # only happen if the LLM hallucinates another tool call
+                    # without the user answering first.
+                    # ----------------------------------------------------------
+                    if session.is_tool_blocked(tc.name):
+                        blocked_msg = (
+                            f"⚠️ Tool '{tc.name}' is blocked: a confirmation is already "
+                            "pending for a previous operation. Please answer yes or no first."
+                        )
+                        session.add_message(
+                            Message(
+                                role="tool",
+                                content=blocked_msg,
+                                name=tc.name,
+                                tool_call_id=tc.id,
+                            )
+                        )
+                        reasoning_steps.append({
+                            "step": step_num,
+                            "type": "blocked",
+                            "thought": "Mutating tool call blocked — confirmation still pending.",
+                            "action": tc.name,
+                            "observation": blocked_msg,
+                        })
+                        # Surface the still-pending confirmation back to the user
+                        requires_confirmation = True
+                        confirmation_preview = session.pending_confirmation.preview if session.pending_confirmation else None
+                        final_response = blocked_msg
+                        break
+
                     tool = self.tools.get(tc.name)
                     if not tool:
                         result = ToolResult(
@@ -186,17 +242,19 @@ class Agent:
                         "success": result.success,
                     })
 
-                    # Check if tool requires confirmation
+                    # Check if tool requires confirmation — transition state machine
                     if result.requires_confirmation:
-                        # Store pending confirmation
                         op = result.data.get("operation", "unknown") if result.data else "unknown"
                         ds = result.data.get("dataset", "") if result.data else ""
-                        session.pending_confirmation = PendingConfirmation(
+                        pending = PendingConfirmation(
                             operation=op,
                             dataset=ds,
                             data=result.data if result.data else {},
                             preview=result.preview or result.message,
                         )
+                        # Structural transition: IDLE → AWAITING_CONFIRMATION
+                        session.request_confirmation(pending)
+
                         requires_confirmation = True
                         confirmation_preview = result.preview or result.message
                         final_response = result.message
@@ -210,7 +268,7 @@ class Agent:
                                 tool_call_id=tc.id,
                             )
                         )
-                        break  # Stop loop — wait for confirmation
+                        break  # Stop loop — wait for user confirmation
 
                     # Add compact tool result to history for next iteration
                     session.add_message(
@@ -282,17 +340,17 @@ class Agent:
             rows = data["data"]
             total = data.get("total_matching", len(rows))
 
-            if len(rows) <= MAX_OBSERVATION_ROWS:
-                # Small result set — include everything
+            if len(rows) <= settings.max_observation_rows:
                 return json.dumps(data, default=str)
 
             # Large result set — truncate and summarize
+            max_rows = settings.max_observation_rows
             compact = {
                 "total_matching": total,
                 "rows_returned": len(rows),
-                "showing_first": MAX_OBSERVATION_ROWS,
-                "data": rows[:MAX_OBSERVATION_ROWS],
-                "note": f"Showing first {MAX_OBSERVATION_ROWS} of {total} matching rows. Use filters, sort, or limit to narrow results.",
+                "showing_first": max_rows,
+                "data": rows[:max_rows],
+                "note": f"Showing {min(max_rows, len(rows))} of {total} total rows.",
             }
             return json.dumps(compact, default=str)
 
@@ -302,7 +360,16 @@ class Agent:
     async def _handle_confirmation(
         self, session: Session, user_message: str, start_time: float
     ) -> AgentResponse:
-        """Handle a user's yes/no response to a pending confirmation."""
+        """
+        Handle a user's yes/no response to a pending confirmation.
+
+        This is the ONLY code path that can reach _execute_confirmed_mutation.
+        It calls session.begin_commit() first, which raises RuntimeError if
+        the session is not in AWAITING_CONFIRMATION — a second structural guard.
+
+        After a confirmed mutation, the agent re-enters the ReAct loop so the
+        LLM can query and display the affected record(s) in a markdown table.
+        """
         pending = session.pending_confirmation
         session.add_message(Message(role="user", content=user_message))
 
@@ -314,7 +381,7 @@ class Agent:
         tool_calls = []
 
         if not confirmed and not declined:
-            # Ambiguous — ask the LLM to interpret
+            # Broader substring check
             if any(word in normalized for word in ["yes", "confirm", "proceed", "sure", "ok"]):
                 confirmed = True
             elif any(word in normalized for word in ["no", "cancel", "don't", "stop"]):
@@ -326,21 +393,178 @@ class Agent:
                     session_id=session.session_id,
                     response=response,
                     requires_confirmation=True,
-                    confirmation_preview=pending.preview,
+                    confirmation_preview=pending.preview if pending else None,
                 )
 
         if confirmed:
-            # Execute the mutation
-            result = self._execute_confirmed_mutation(pending)
+            # Structural transition: AWAITING_CONFIRMATION → COMMITTING
+            # begin_commit() raises RuntimeError if state is wrong — impossible
+            # to call this without going through request_confirmation() first.
+            session.begin_commit()
+            mutation_result = self._execute_confirmed_mutation(pending)
+            session.finish_commit()  # COMMITTING → IDLE
+
             reasoning_steps.append({
                 "step": 1,
                 "thought": "User confirmed the operation",
                 "action": f"execute_{pending.operation}",
-                "observation": result,
+                "observation": mutation_result,
             })
-            response = result
-            session.pending_confirmation = None
+
+            # -----------------------------------------------------------------
+            # Re-enter the ReAct loop so the LLM can query and display the
+            # affected record(s) in a markdown table, as required by the
+            # system prompt. We inject the mutation result as an assistant
+            # message, then add a system-level follow-up instruction telling
+            # the LLM exactly which dataset/filters to use for the re-query.
+            # -----------------------------------------------------------------
+            session.add_message(Message(
+                role="assistant",
+                content=mutation_result,
+            ))
+
+            dataset = pending.data.get("dataset", "")
+            op = pending.operation
+
+            if op == "insert":
+                rows = pending.data.get("rows", [])
+                follow_up = (
+                    f"[SYSTEM] Mutation succeeded: {mutation_result}\n"
+                    f"The inserted row(s) contained these values: {json.dumps(rows, default=str)}.\n"
+                    f"Now use query_data on dataset '{dataset}' to fetch the affected "
+                    f"record(s) by their ID and display them in a markdown table as required."
+                )
+            elif op == "update":
+                filters = pending.data.get("filters", [])
+                follow_up = (
+                    f"[SYSTEM] Mutation succeeded: {mutation_result}\n"
+                    f"The updated record(s) match these filters: {json.dumps(filters, default=str)}.\n"
+                    f"Now use query_data on dataset '{dataset}' with those same filters "
+                    f"to fetch the current state of the affected record(s) and display "
+                    f"them in a markdown table as required."
+                )
+            elif op == "delete":
+                follow_up = (
+                    f"[SYSTEM] Mutation succeeded: {mutation_result}\n"
+                    f"The record(s) have been permanently deleted. "
+                    f"Confirm the deletion to the user with the success message only — "
+                    f"do not attempt to query deleted records."
+                )
+            elif op == "undo":
+                # For undo, we try to surface the reverted records
+                follow_up = (
+                    f"[SYSTEM] Mutation succeeded: {mutation_result}\n"
+                    f"The undo operation has reverted the previous change on dataset '{dataset}'. "
+                    f"Use query_data on dataset '{dataset}' to fetch and display the reverted "
+                    f"record(s) in a markdown table as required."
+                )
+            else:
+                follow_up = (
+                    f"[SYSTEM] Mutation succeeded: {mutation_result}\n"
+                    f"Confirm the result to the user."
+                )
+
+            session.add_message(Message(role="user", content=follow_up))
+
+            # Run a mini ReAct loop so the LLM fetches and renders the table
+            final_response = mutation_result  # fallback if loop produces nothing
+
+            for iteration in range(self.max_iterations):
+                step_num = iteration + 2  # continues from step 1 above
+
+                messages = session.get_llm_messages(self.max_history)
+                try:
+                    llm_response = await self.llm.generate(messages, self._tool_schemas)
+                except Exception as e:
+                    final_response = (
+                        f"{mutation_result}\n\n"
+                        f"(Could not fetch the updated record: {e})"
+                    )
+                    break
+
+                if llm_response.has_tool_calls:
+                    tc_dicts = [
+                        {
+                            "id": tc.id,
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        }
+                        for tc in llm_response.tool_calls
+                    ]
+                    session.add_message(
+                        Message(
+                            role="assistant",
+                            content=llm_response.content or "",
+                            tool_calls=tc_dicts,
+                        )
+                    )
+
+                    for tc in llm_response.tool_calls:
+                        tool = self.tools.get(tc.name)
+                        if not tool:
+                            result = ToolResult(
+                                success=False,
+                                message=f"Unknown tool: {tc.name}",
+                            )
+                        else:
+                            try:
+                                result = tool.execute(**tc.arguments)
+                            except Exception as e:
+                                result = ToolResult(
+                                    success=False,
+                                    message=f"Tool execution error: {e}",
+                                )
+
+                        observation_for_llm = self._compact_observation(result)
+
+                        reasoning_steps.append({
+                            "step": step_num,
+                            "type": "action",
+                            "thought": llm_response.content or "Fetching affected record(s) to display as table.",
+                            "action": f"{tc.name}({json.dumps(tc.arguments, default=str)})",
+                            "action_tool": tc.name,
+                            "action_input": tc.arguments,
+                            "observation": result.message,
+                        })
+
+                        tool_calls.append({
+                            "tool": tc.name,
+                            "input": tc.arguments,
+                            "output": result.message,
+                            "success": result.success,
+                        })
+
+                        session.add_message(
+                            Message(
+                                role="tool",
+                                content=observation_for_llm,
+                                name=tc.name,
+                                tool_call_id=tc.id,
+                            )
+                        )
+
+                else:
+                    # Prepend the success message so the action ID is always visible,
+                    # then append the LLM's formatted table below it.
+                    llm_content = llm_response.content or ""
+                    final_response = f"{mutation_result}\n\n{llm_content}".strip()
+                    
+                    reasoning_steps.append({
+                        "step": step_num,
+                        "type": "finish",
+                        "thought": "Displaying affected record(s) after confirmed mutation.",
+                        "action": None,
+                        "observation": final_response[:200] + ("..." if len(final_response) > 200 else ""),
+                    })
+                    session.add_message(
+                        Message(role="assistant", content=final_response)
+                    )
+                    break
+
+            response = final_response
+
         else:
+            # User declined
             response = "Operation cancelled. No changes were made."
             reasoning_steps.append({
                 "step": 1,
@@ -348,9 +572,8 @@ class Agent:
                 "action": "cancel",
                 "observation": "Operation cancelled",
             })
-            session.pending_confirmation = None
-
-        session.add_message(Message(role="assistant", content=response))
+            session.cancel_confirmation()  # AWAITING_CONFIRMATION → IDLE
+            session.add_message(Message(role="assistant", content=response))
 
         latency_ms = int((time.time() - start_time) * 1000)
         self.logger.log_interaction(
@@ -371,16 +594,62 @@ class Agent:
         )
 
     def _execute_confirmed_mutation(self, pending: PendingConfirmation) -> str:
-        """Execute a confirmed mutation."""
+        """
+        Execute a confirmed mutation.
+
+        Only reachable after session.begin_commit() has been called, which
+        requires AWAITING_CONFIRMATION state — completing the state-machine
+        guarantee that no write bypasses user confirmation.
+
+        Enum extension: if the pending data contains `pending_enum_proposals`,
+        the user has confirmed adding new enum values.  We extend the schema
+        first, then execute the insert/update with allow_new_enum_values=True
+        so the validator accepts the now-registered value.
+
+        Range override: if the pending data contains `pending_range_proposals`,
+        the user has confirmed they want to use an out-of-range value.  We
+        proceed directly — type safety was already validated, only the range
+        check was soft-failed.
+        """
         try:
             data = pending.data
             op = pending.operation
+
+            # Apply enum extensions if the user confirmed new property types
+            enum_proposals = data.get("pending_enum_proposals", [])
+            if enum_proposals:
+                for proposal in enum_proposals:
+                    extend_enum(
+                        dataset=data["dataset"],
+                        column=proposal["column"],
+                        new_value=proposal["proposed_value"],
+                    )
+
+            # Range proposals don't need schema changes — just a note
+            range_proposals = data.get("pending_range_proposals", [])
+
+            # Build extension/override notes for the success message
+            notes = []
+            if enum_proposals:
+                note_parts = ", ".join(
+                    p["column"] + '="' + p["proposed_value"] + '"'
+                    for p in enum_proposals
+                )
+                notes.append(f"Schema extended: {note_parts}")
+            if range_proposals:
+                note_parts = ", ".join(
+                    f"{p['column']}={p['proposed_value']}"
+                    for p in range_proposals
+                )
+                notes.append(f"Range override: {note_parts}")
+            extended_note = f" ({'; '.join(notes)})" if notes else ""
 
             if op == "insert":
                 result = self.dm.insert_rows(data["dataset"], data["rows"])
                 return (
                     f"✅ Successfully inserted {result['inserted_count']} row(s). "
                     f"(Action ID: {result['action_id']} — use this to undo if needed)"
+                    + extended_note
                 )
 
             elif op == "update":
@@ -390,6 +659,7 @@ class Agent:
                 return (
                     f"✅ Successfully updated {result['updated_count']} row(s). "
                     f"(Action ID: {result['action_id']} — use this to undo if needed)"
+                    + extended_note
                 )
 
             elif op == "delete":
@@ -413,4 +683,12 @@ class Agent:
                 return f"❌ Unknown operation: {op}"
 
         except Exception as e:
+            logger.error(
+                "[%s] Mutation failed — op=%s, dataset=%s: %s",
+                pending.operation,
+                pending.operation,
+                pending.data.get("dataset", "unknown"),
+                e,
+                exc_info=True,
+            )
             return f"❌ Error executing {pending.operation}: {e}"

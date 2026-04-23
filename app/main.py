@@ -118,7 +118,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -265,25 +265,25 @@ async def chat_stream(request: ChatRequest):
         try:
             session = session_manager.get_or_create_session(request.session_id)
             yield _sse_event("session_id", {"session_id": session.session_id})
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(settings.sse_event_delay)
 
             result = await agent.process_message(session, request.message)
 
             # Stream reasoning steps
             for step in result.reasoning_steps:
                 yield _sse_event("thinking", step)
-                await asyncio.sleep(0.05)  # Small delay to ensure browser receives each event
+                await asyncio.sleep(settings.sse_thinking_delay)
 
             yield _sse_event("thinking_end", {})
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(settings.sse_event_delay)
 
-            # Stream the final response in small chunks for a typing effect
+            # Stream the final response in chunks for a typing effect
             response_text = result.response or ""
-            chunk_size = 8  # characters per chunk
+            chunk_size = settings.sse_chunk_size
             for i in range(0, len(response_text), chunk_size):
                 chunk = response_text[i : i + chunk_size]
                 yield _sse_event("token", {"token": chunk})
-                await asyncio.sleep(0.02)  # ~20ms per chunk for smooth streaming
+                await asyncio.sleep(settings.sse_token_delay)
 
             latency_ms = int((time.time() - start_time) * 1000)
 

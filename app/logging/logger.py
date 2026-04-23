@@ -14,14 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.config import LOGS_DIR
+from app.config import LOGS_DIR, settings
 
 
 # Also set up standard Python logging for console output
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    datefmt="%H:%M:%S",
+    level=getattr(logging, settings.log_level, logging.INFO),
+    format=settings.log_format,
+    datefmt=settings.log_date_format,
 )
 
 

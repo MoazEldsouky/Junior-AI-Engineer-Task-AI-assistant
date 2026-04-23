@@ -3,6 +3,14 @@ LLM Provider — Abstract base class and shared types.
 
 All providers normalize to a common interface so the agent logic
 never needs to know which LLM is behind the scenes.
+
+Architecture:
+  BaseLLMProvider          (abstract)
+  ├── GeminiProvider       (Google GenAI SDK — structurally different)
+  └── OpenAICompatibleProvider  (concrete base for all OpenAI-style APIs)
+      ├── GroqProvider
+      ├── GitHubModelsProvider
+      └── OpenRouterProvider
 """
 
 from __future__ import annotations
@@ -11,6 +19,8 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+from app.config import settings
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +48,7 @@ class LLMResponse:
 
 
 # ---------------------------------------------------------------------------
-# Abstract provider
+# Abstract base
 # ---------------------------------------------------------------------------
 
 class BaseLLMProvider(ABC):
@@ -90,7 +100,7 @@ class BaseLLMProvider(ABC):
         ]
 
     @staticmethod
-    async def _retry_request(coro_factory, max_retries: int = 5):
+    async def _retry_request(coro_factory, max_retries: int | None = None):
         """
         Retry an async HTTP request with exponential backoff.
 
@@ -100,14 +110,15 @@ class BaseLLMProvider(ABC):
         import asyncio
         import httpx
 
-        backoff_schedule = [3, 8, 15, 30, 60]  # seconds per retry attempt
+        if max_retries is None:
+            max_retries = settings.llm_max_retries
+        backoff_schedule = settings.llm_retry_backoff
 
         for attempt in range(max_retries):
             try:
                 return await coro_factory()
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429 and attempt < max_retries - 1:
-                    # Respect retry-after header if provided
                     retry_after = e.response.headers.get("retry-after")
                     if retry_after:
                         try:
@@ -124,7 +135,7 @@ class BaseLLMProvider(ABC):
                     await asyncio.sleep(wait)
                     continue
                 raise
-            except (httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+            except (httpx.ConnectTimeout, httpx.ReadTimeout):
                 if attempt < max_retries - 1:
                     await asyncio.sleep(backoff_schedule[attempt])
                     continue
@@ -132,6 +143,101 @@ class BaseLLMProvider(ABC):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(model={self.model!r})"
+
+
+# ---------------------------------------------------------------------------
+# Concrete base for all OpenAI-compatible providers
+# ---------------------------------------------------------------------------
+
+class OpenAICompatibleProvider(BaseLLMProvider):
+    """
+    Shared implementation for every OpenAI-compatible REST endpoint.
+
+    Subclasses only need to declare two class-level attributes:
+
+        _api_url        : str             — the full chat-completions URL
+        _extra_headers  : dict[str, str]  — any provider-specific headers
+
+    The generate() + _parse_openai_response() logic lives here **once**.
+    Fixing a bug or adding a feature (e.g. streaming) instantly applies to
+    Groq, GitHub Models, and OpenRouter simultaneously.
+    """
+
+    _api_url: str = ""
+    _extra_headers: dict[str, str] = {}
+
+    def __init__(self, api_key: str, model: str):
+        super().__init__(api_key, model)
+        import httpx
+        # Persistent client — reuses TCP/TLS connections across requests
+        self._client = httpx.AsyncClient(timeout=settings.llm_request_timeout)
+
+    async def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            **self._extra_headers,
+        }
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": settings.llm_temperature,
+            "max_tokens": settings.llm_max_tokens,
+        }
+
+        tool_schemas = self._build_tool_schemas(tools)
+        if tool_schemas:
+            payload["tools"] = tool_schemas
+            payload["tool_choice"] = "auto"
+
+        async def _do_request():
+            response = await self._client.post(self._api_url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response.json()
+
+        data = await self._retry_request(_do_request)
+        return self._parse_openai_response(data)
+
+    def _parse_openai_response(self, data: dict) -> LLMResponse:
+        """Parse an OpenAI-compatible chat-completions response."""
+        choice = data["choices"][0]
+        message = choice["message"]
+
+        content = message.get("content")
+        tool_calls = []
+
+        if message.get("tool_calls"):
+            for tc in message["tool_calls"]:
+                func = tc["function"]
+                args = func.get("arguments", "{}")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"raw": args}
+                tool_calls.append(
+                    ToolCall(
+                        id=tc.get("id", ""),
+                        name=func["name"],
+                        arguments=args,
+                    )
+                )
+
+        usage = {}
+        if "usage" in data:
+            u = data["usage"]
+            usage = {
+                "prompt_tokens": u.get("prompt_tokens", 0),
+                "completion_tokens": u.get("completion_tokens", 0),
+                "total_tokens": u.get("total_tokens", 0),
+            }
+
+        return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
 
 
 # ---------------------------------------------------------------------------

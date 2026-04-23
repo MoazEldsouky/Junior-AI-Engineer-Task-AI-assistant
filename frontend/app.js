@@ -98,6 +98,40 @@ function renderMarkdown(text) {
     // Horizontal rule
     html = html.replace(/^---$/gm, '<hr>');
 
+    // ── Markdown tables ──
+    // Detect blocks of consecutive pipe-delimited lines
+    html = html.replace(
+        /((?:^\|.+\|[ \t]*$\n?){2,})/gm,
+        (tableBlock) => {
+            const rows = tableBlock.trim().split('\n').filter(r => r.trim());
+            if (rows.length < 2) return tableBlock;
+
+            // Check if row 2 is a separator (e.g. |---|---|)
+            const isSeparator = /^\|[\s\-:|]+\|$/.test(rows[1].trim());
+            if (!isSeparator) return tableBlock;
+
+            // Parse header
+            const headerCells = rows[0].split('|').filter(c => c.trim() !== '');
+            let tableHtml = '<table><thead><tr>';
+            headerCells.forEach(cell => {
+                tableHtml += `<th>${cell.trim()}</th>`;
+            });
+            tableHtml += '</tr></thead><tbody>';
+
+            // Parse body rows (skip row 0 = header, row 1 = separator)
+            for (let i = 2; i < rows.length; i++) {
+                const cells = rows[i].split('|').filter(c => c.trim() !== '');
+                tableHtml += '<tr>';
+                cells.forEach(cell => {
+                    tableHtml += `<td>${cell.trim()}</td>`;
+                });
+                tableHtml += '</tr>';
+            }
+            tableHtml += '</tbody></table>';
+            return `<div class="table-scroll-wrapper">${tableHtml}</div>`;
+        }
+    );
+
     // Unordered lists (lines starting with - )
     html = html.replace(/^(\s*)[-*] (.+)$/gm, (match, indent, content) => {
         return `<li>${content}</li>`;
@@ -109,7 +143,7 @@ function renderMarkdown(text) {
     html = html.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
 
     // Paragraphs: wrap remaining loose lines
-    html = html.replace(/^(?!<[hluop]|<\/|<li|<hr|<pre|<code)(.+)$/gm, '<p>$1</p>');
+    html = html.replace(/^(?!<[hluopt]|<\/|<li|<hr|<pre|<code|<table|<thead|<tbody|<tr|<td|<th)(.+)$/gm, '<p>$1</p>');
 
     // Clean up extra newlines
     html = html.replace(/\n{2,}/g, '\n');
@@ -307,6 +341,7 @@ async function sendMessage(text) {
 
     appendMessage('user', text);
     chatInput.value = '';
+    chatInput.style.height = 'auto';  // Reset textarea height after send
     showLatencyProcessing();
 
     let thinkingElements = null;
@@ -415,6 +450,22 @@ async function sendMessage(text) {
 
     isProcessing = false;
 }
+
+// ─── Textarea auto-resize ───
+function autoResizeTextarea() {
+    chatInput.style.height = 'auto';               // Shrink first to measure
+    chatInput.style.height = chatInput.scrollHeight + 'px';  // Expand to content
+}
+
+chatInput.addEventListener('input', autoResizeTextarea);
+
+// ─── Keyboard: Enter sends, Shift+Enter inserts newline ───
+chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        chatForm.dispatchEvent(new Event('submit', { cancelable: true }));
+    }
+});
 
 // ─── Event Listeners ───
 chatForm.addEventListener('submit', (e) => {

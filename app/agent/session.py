@@ -3,6 +3,18 @@ Session Manager — manages conversation history and pending confirmations.
 
 Each session tracks the full conversation history, any pending mutations
 awaiting confirmation, and session metadata for cleanup.
+
+State Machine
+-------------
+The session moves through exactly these states for any mutation:
+
+    IDLE  →  AWAITING_CONFIRMATION  →  COMMITTING  →  IDLE
+
+Key invariant: the system cannot reach COMMITTING without passing
+through AWAITING_CONFIRMATION first.  The LLM has no way to skip it —
+mutating tools (insert_data, update_data, delete_data, undo_change)
+are structurally blocked when state == AWAITING_CONFIRMATION, so the
+only execution path for the actual write is _execute_confirmed_mutation.
 """
 
 from __future__ import annotations
@@ -10,8 +22,24 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any
 
+
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+
+class AgentState(Enum):
+    """The current confirmation state of a session."""
+    IDLE = "idle"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    COMMITTING = "committing"
+
+
+# ---------------------------------------------------------------------------
+# Message model
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Message:
@@ -65,6 +93,9 @@ class Message:
         return {"role": self.role, "content": self.content or ""}
 
 
+# ---------------------------------------------------------------------------
+# Pending confirmation
+# ---------------------------------------------------------------------------
 
 @dataclass
 class PendingConfirmation:
@@ -76,14 +107,75 @@ class PendingConfirmation:
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
 
+# ---------------------------------------------------------------------------
+# Session
+# ---------------------------------------------------------------------------
+
+# Tool names that are allowed to execute only via the confirmation path,
+# not directly from the LLM tool-call loop.
+MUTATING_TOOLS: frozenset[str] = frozenset({
+    "insert_data",
+    "update_data",
+    "delete_data",
+    "undo_change",
+})
+
+
 @dataclass
 class Session:
     """A conversation session with history and state."""
     session_id: str
     history: list[Message] = field(default_factory=list)
+    state: AgentState = AgentState.IDLE
     pending_confirmation: PendingConfirmation | None = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     last_active: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+
+    # ------------------------------------------------------------------
+    # State helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def is_awaiting_confirmation(self) -> bool:
+        return self.state == AgentState.AWAITING_CONFIRMATION
+
+    def request_confirmation(self, pending: PendingConfirmation) -> None:
+        """Transition IDLE → AWAITING_CONFIRMATION and store pending op."""
+        self.pending_confirmation = pending
+        self.state = AgentState.AWAITING_CONFIRMATION
+
+    def begin_commit(self) -> None:
+        """Transition AWAITING_CONFIRMATION → COMMITTING (the only path)."""
+        if self.state != AgentState.AWAITING_CONFIRMATION:
+            raise RuntimeError(
+                f"Cannot commit: session state is {self.state.value!r}, "
+                "expected 'awaiting_confirmation'. "
+                "COMMITTING is only reachable via AWAITING_CONFIRMATION."
+            )
+        self.state = AgentState.COMMITTING
+
+    def finish_commit(self) -> None:
+        """Transition COMMITTING → IDLE and clear pending confirmation."""
+        self.pending_confirmation = None
+        self.state = AgentState.IDLE
+
+    def cancel_confirmation(self) -> None:
+        """Transition AWAITING_CONFIRMATION → IDLE without committing."""
+        self.pending_confirmation = None
+        self.state = AgentState.IDLE
+
+    def is_tool_blocked(self, tool_name: str) -> bool:
+        """
+        Return True if a tool call must be blocked.
+
+        Mutating tools are blocked while in AWAITING_CONFIRMATION so that
+        a hallucinating LLM cannot bypass the user confirmation step.
+        """
+        return self.is_awaiting_confirmation and tool_name in MUTATING_TOOLS
+
+    # ------------------------------------------------------------------
+    # History helpers
+    # ------------------------------------------------------------------
 
     def add_message(self, message: Message):
         """Add a message to the conversation history."""
@@ -108,6 +200,10 @@ class Session:
 
         return messages
 
+
+# ---------------------------------------------------------------------------
+# Session manager
+# ---------------------------------------------------------------------------
 
 class SessionManager:
     """Manages multiple conversation sessions."""

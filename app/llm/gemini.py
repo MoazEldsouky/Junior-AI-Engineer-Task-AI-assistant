@@ -16,6 +16,7 @@ from google import genai
 from google.genai import types
 
 from app.llm.base import BaseLLMProvider, LLMResponse, ToolCall
+from app.config import settings
 
 
 class GeminiProvider(BaseLLMProvider):
@@ -192,7 +193,7 @@ class GeminiProvider(BaseLLMProvider):
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=gemini_tools,
-            temperature=0,
+            temperature=settings.llm_temperature,
         )
 
         # The google-genai client supports async natively

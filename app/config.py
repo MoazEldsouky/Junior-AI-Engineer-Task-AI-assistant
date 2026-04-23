@@ -1,8 +1,10 @@
 """
-Application configuration — loads settings from .env file.
+Centralized Configuration — single source of truth for every tunable
+parameter in the system.
 
-Uses pydantic-settings for type-safe environment variable loading with
-sensible defaults. At least one LLM provider API key must be configured.
+Uses pydantic-settings to load from environment / .env with type-safe
+defaults.  Every module imports from here — no hardcoded magic numbers
+anywhere else in the codebase.
 """
 
 import os
@@ -41,26 +43,62 @@ DEFAULT_MODELS: dict[str, str] = {
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment / .env file."""
+    """
+    Application settings — every tunable parameter lives here.
 
-    # --- LLM API Keys ---
+    Sections:
+        • LLM API Keys
+        • LLM Generation
+        • Retry & Resilience
+        • Agent / ReAct Loop
+        • Session Management
+        • Server & API
+        • SSE Streaming
+        • Logging
+    """
+
+    # ── LLM API Keys ──────────────────────────────────────────────────
     gemini_api_key: str = ""
     groq_api_key: str = ""
     openrouter_api_key: str = ""
     github_token: str = ""
 
-    # --- Active provider & model ---
+    # ── Active provider & model ───────────────────────────────────────
     llm_provider: LLMProvider = LLMProvider.GEMINI
     llm_model: str = ""  # Empty → use DEFAULT_MODELS
 
-    # --- Server ---
+    # ── LLM Generation ────────────────────────────────────────────────
+    llm_temperature: float = 0          # Deterministic output
+    llm_max_tokens: int = 2048          # Max response tokens per LLM call
+    llm_request_timeout: float = 60.0   # HTTP timeout in seconds
+
+    # ── Retry & Resilience ────────────────────────────────────────────
+    llm_max_retries: int = 3                           # Max retry attempts on 429/5xx
+    llm_retry_backoff: list[int] = [3, 8, 15, 30, 60]  # Backoff seconds per attempt
+
+    # ── Agent / ReAct Loop ────────────────────────────────────────────
+    max_agent_iterations: int = 5      # Max Reason→Act→Observe cycles
+    max_observation_rows: int = 30     # Rows sent to LLM per tool observation
+    max_history_messages: int = 20     # Conversation messages sent to LLM
+
+    # ── Session Management ────────────────────────────────────────────
+    session_ttl_minutes: int = 60      # Auto-expire sessions after N minutes
+
+    # ── Server & API ──────────────────────────────────────────────────
     host: str = "0.0.0.0"
     port: int = 8000
+    cors_origins: list[str] = ["*"]    # Allowed CORS origins
 
-    # --- Agent ---
-    max_agent_iterations: int = 5
-    session_ttl_minutes: int = 60
-    max_history_messages: int = 20
+    # ── SSE Streaming ─────────────────────────────────────────────────
+    sse_chunk_size: int = 20              # Characters per token event
+    sse_token_delay: float = 0.008        # Seconds between token chunks
+    sse_thinking_delay: float = 0.015     # Seconds between thinking events
+    sse_event_delay: float = 0.01         # Seconds between control events
+
+    # ── Logging ───────────────────────────────────────────────────────
+    log_level: str = "INFO"
+    log_format: str = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+    log_date_format: str = "%H:%M:%S"
 
     model_config = {
         "env_file": str(PROJECT_ROOT / ".env"),
