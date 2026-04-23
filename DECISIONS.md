@@ -67,22 +67,22 @@ This document explains the key design decisions made in building the AI Agent Ex
 
 ---
 
-## 5. Validation: Fail-Fast with Clear Errors + Dynamic Enum Extension
+## 5. Validation: Fail-Fast with Clear Errors, Enum Extensions & Range Overrides
 
-**Decision:** Every mutation passes through a `Validator` that checks types, ranges, enums, and required fields before any data is touched. Unknown enum values now trigger a **confirmation-based extension flow** rather than a hard rejection (see §17).
+**Decision:** Every mutation passes through a `Validator` that checks types, ranges, enums, and required fields before any data is touched. Unknown enum values and out-of-range values now trigger a **confirmation-based extension/override flow** rather than a hard rejection (see §17).
 
 **Why:** Catching errors before they reach the database prevents corrupted data and gives users actionable feedback. The validator knows the schema constraints (e.g., Property Type must be House/Condo/Apartment/Townhouse) and returns specific error messages.
 
 **Tradeoff:**
-* ~~**Strict vs. Flexible Schemas:** Strict rules prevent users from adding their own custom categories on the fly.~~ **Resolved:** Users can now add new enum values (e.g., "Twitter" as a Channel) through a two-step confirmation flow that ensures they understand they are permanently extending the schema.
-* **Data Quality:** The confirmation step preserves data integrity — users can't accidentally add junk values, but they *can* intentionally extend the schema when needed.
+* **Strict vs. Flexible Schemas:** Users can now add new enum values (e.g., "Twitter" as a Channel) or bypass numeric range soft limits through a two-step confirmation flow that ensures they understand they are permanently extending the schema or overriding a rule.
+* **Data Quality:** The confirmation step preserves data integrity — users can't accidentally add junk values, but they *can* intentionally extend the schema or bypass ranges when needed.
 
 **Design Choices:**
 - **Enum validation** with case-insensitive matching (auto-corrects "house" → "House")
-- **Dynamic enum extension** via `EnumProposal` + user confirmation (see §17)
+- **Dynamic enum extension & range overrides** via `EnumProposal` and `RangeProposal` + user confirmation (see §17)
 - **Date parsing** with multiple format support (YYYY-MM-DD, MM/DD/YYYY, etc.)
 - **Range checks** on numeric columns (e.g., Year Built: 1800–current year)
-- **Warnings vs. Errors:** Soft issues (type coercion) are warnings; hard violations (wrong enum) are errors; unknown enums are proposals
+- **Warnings vs. Errors:** Soft issues (type coercion) are warnings; hard violations (wrong enum) are errors; unknown enums/out-of-range are proposals
 
 ---
 
@@ -97,7 +97,7 @@ Record 'LST-5001':
   List Price: 351000 → 482000
 ```
 
-**Implementation:** Tools return `requires_confirmation=True` with a preview string. The session transitions to `AWAITING_CONFIRMATION` state via `session.request_confirmation()`. While in this state, mutating tools are **structurally blocked** — even if the LLM hallucinates a direct tool call, it will be intercepted and rejected. The only path to executing the mutation is through `_handle_confirmation()` → `session.begin_commit()` → `_execute_confirmed_mutation()`, which enforces the `AWAITING_CONFIRMATION → COMMITTING → IDLE` state transition.
+**Implementation:** Tools return `requires_confirmation=True` with a rich preview string prefixed with "CONFIRMATION: ". The session transitions to `AWAITING_CONFIRMATION` state via `session.request_confirmation()`. While in this state, mutating tools are **structurally blocked** — even if the LLM hallucinates a direct tool call, it will be intercepted and rejected. The only path to executing the mutation is through `_handle_confirmation()` → `session.begin_commit()` → `_execute_confirmed_mutation()`. After execution, the agent **re-enters a mini ReAct loop** to automatically query the dataset and display the affected record(s) in a Markdown table.
 
 **Earlier approach (discarded):** A modal popup intercepted mutation responses and presented Confirm/Cancel buttons. This was removed because it broke the natural chat flow — users expect to respond conversationally, not via UI dialogs.
 
@@ -157,6 +157,7 @@ Record 'LST-5001':
 - Available dataset schemas (column names, types, value ranges)
 - Explicit tool parameter names and usage instructions
 - Explicit rules (never fabricate data, always use tools)
+- Strict formatting rules requiring ALL query and mutation results (even single rows) to be displayed in Markdown tables.
 
 **Why:** Injecting actual schema information helps the LLM make accurate tool calls. Without schema awareness, the model guesses column names and gets them wrong.
 
@@ -208,7 +209,7 @@ Record 'LST-5001':
 | Optimization | Impact | Detail |
 |---|---|---|
 | **Persistent HTTP Client** | ~50-150ms saved per LLM call | Reuse `httpx.AsyncClient` across requests instead of opening a new TCP+TLS connection each time |
-| **Compact Tool Observations** | ~30-40% fewer prompt tokens per turn | Truncate query results to 10 rows before feeding back to the LLM. The agent still gets enough data to compose accurate responses |
+| **Compact Tool Observations** | ~30-40% fewer prompt tokens per turn | Truncate query results to `settings.max_observation_rows` (default 30) before feeding back to the LLM. The agent still gets enough data to compose accurate responses |
 | **Cached Tool Schemas** | Minor CPU savings | Tool schemas are computed once at `__init__()` instead of every loop iteration |
 | **Leaner System Prompt** | ~500-700 fewer tokens per request | Removed `sample_rows` and `mean` from the prompt schema — the LLM can fetch these via tools when needed |
 | **No DataFrame Copy** | ~1-5ms per query | Removed unnecessary `.copy()` on read-only query paths |
@@ -292,30 +293,30 @@ IDLE → AWAITING_CONFIRMATION → COMMITTING → IDLE
 
 ---
 
-## 17. Dynamic Enum Extension with Confirmation
+## 17. Dynamic Enum Extension & Range Overrides with Confirmation
 
-**Decision:** Allow users to add new enum values (e.g., "Twitter" as a Channel) through a **two-step confirmation flow**, rather than rejecting them outright.
+**Decision:** Allow users to add new enum values (e.g., "Twitter" as a Channel) or bypass numeric range limits through a **two-step confirmation flow**, rather than rejecting them outright.
 
 **Flow:**
 
-```
-1. User provides unknown enum value (e.g., Channel="Twitter")
-2. Validator detects it → creates EnumProposal (not a hard error)
+```text
+1. User provides unknown enum value (e.g., Channel="Twitter") or out-of-range value
+2. Validator detects it → creates EnumProposal or RangeProposal (not a hard error)
 3. Tool returns requires_confirmation=True with explicit warning:
-   ⚠️ New Property Type Warning
+   ⚠️ New Property Type Warning / Range Override Warning
    • Channel: "Twitter" is not one of [Facebook, Instagram, ...]
    Adding this will permanently extend the dataset schema.
 4. Session transitions to AWAITING_CONFIRMATION (same state machine)
-5. User confirms → extend_enum() adds "Twitter" to COLUMN_SCHEMAS
-6. Insert/update proceeds normally
+5. User confirms → extend_enum() adds "Twitter" to COLUMN_SCHEMAS, or range override is applied
+6. Insert/update proceeds normally and affected records are displayed
 ```
 
 **Key Types:**
-- `EnumProposal(dataset, column, proposed_value, current_values)` — proposal data
-- `ValidationResult.new_enum_proposals` — list of proposals requiring confirmation
+- `EnumProposal` and `RangeProposal` — proposal data
+- `ValidationResult.new_enum_proposals` and `pending_range_proposals` — proposals requiring confirmation
 - `extend_enum(dataset, column, new_value)` — permanently adds value to schema
 
-**Why:** The original validator was too rigid — users couldn't add legitimate new values (e.g., a "Twitter" marketing channel that didn't exist when the dataset was created). But auto-accepting any value risks data corruption ("twiter", "TWITTER", etc.). The confirmation step strikes the right balance: explicit intent + schema integrity.
+**Why:** The original validator was too rigid — users couldn't add legitimate new values or override limits intentionally. But auto-accepting any value risks data corruption. The confirmation step strikes the right balance: explicit intent + schema integrity.
 
 **Tradeoff:** Enum extensions are in-memory — if the server restarts, the schema reverts to defaults. For production, the extended schema should be persisted to a config file or database.
 
@@ -338,7 +339,7 @@ IDLE → AWAITING_CONFIRMATION → COMMITTING → IDLE
 4. ~~Rate limiting middleware~~ ✅ Implemented (exponential backoff)
 5. ~~Deduplicate OpenAI-compatible provider code~~ ✅ Implemented (`OpenAICompatibleProvider`)
 6. ~~Structurally enforce confirmation flow~~ ✅ Implemented (`AgentState` machine)
-7. ~~Allow dynamic enum extension with user consent~~ ✅ Implemented (`EnumProposal` flow)
+7. ~~Allow dynamic enum extension with user consent~~ ✅ Implemented (`EnumProposal` & `RangeProposal` flow)
 8. **Async data operations** — use async file I/O and DataFrame operations in thread pools
 9. **Persist extended enum schemas** — save user-confirmed enum additions to a config file
 

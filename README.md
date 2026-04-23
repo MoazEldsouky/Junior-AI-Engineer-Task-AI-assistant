@@ -14,8 +14,9 @@ Built from scratch with **no agent frameworks** (no LangChain, LlamaIndex, etc.)
 | **CRUD Operations**                         | Insert, update, and delete rows via chat                                                 |
 | **Preview + Confirmation**                  | Every mutation shows a before/after preview and requires explicit confirmation           |
 | **Structurally Enforced Confirmation**      | State machine (`IDLE → AWAITING_CONFIRMATION → COMMITTING`) — the LLM cannot bypass it  |
-| **Dynamic Enum Extension**                  | Add new property types (e.g., "Twitter" as a Channel) with user confirmation             |
+| **Dynamic Schema & Range Overrides**        | Add new property types or bypass range limits with user confirmation                     |
 | **Undo System**                             | Full mutation log with undo support for any past change                                  |
+| **Post-Mutation Display**                   | Automatically queries and renders affected rows in Markdown tables after mutations       |
 | **Data Validation**                         | Type checking, range constraints, and enum validation before mutations                   |
 | **Multi-Turn Conversations**                | Session memory for follow-up questions                                                   |
 | **Multiple LLM Providers**                  | Gemini, Groq, OpenRouter, GitHub Models — switch freely                                  |
@@ -126,8 +127,12 @@ curl -X POST http://localhost:8000/chat \
 
 **Response includes a preview:**
 
-```
+```text
 📝 About to update 1 row(s):
+
+📊 CONFIRMATION: STAGED EXCEL UPDATE (1 Row)
+──────────────────────────────────────────────────
+📁 File: Real Estate Listings.xlsx
 
 Before → After:
   Record 'LST-5001':
@@ -142,6 +147,16 @@ Proceed with update? (yes/no)
 curl -X POST http://localhost:8000/chat/confirm \
   -H "Content-Type: application/json" \
   -d '{"session_id": "abc-123", "confirmed": true}'
+```
+
+**Response:**
+```json
+{
+  "session_id": "abc-123",
+  "response": "✅ Successfully updated 1 row(s). (Action ID: act_12345)\n\n| ID | List Price | ...\n|---|---|...",
+  "reasoning_steps": [{"step": 2, "action": "query_data", ...}],
+  "requires_confirmation": false
+}
 ```
 
 ### Undo a Change
